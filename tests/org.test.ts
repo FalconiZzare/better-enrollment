@@ -168,6 +168,35 @@ describe("org-join creation gate", () => {
     expect(delegated.token).toBeTruthy();
   });
 
+  it("org-join invites cannot set an app role and always carry the default", async () => {
+    const { auth, org, ownerHeaders } = await setupOrg();
+    // The app role is an admin-only field; an org owner passing one
+    // would otherwise be able to mint app admins.
+    expect(
+      await errCode(
+        createInvite(auth, {
+          body: {
+            kind: "org-join",
+            email: "escalate@acme.com",
+            organizationId: org.id,
+            role: "admin"
+          },
+          headers: ownerHeaders
+        })
+      )
+    ).toBe("ROLE_NOT_ALLOWED_FOR_ORG_JOIN");
+
+    const created = await createInvite(auth, {
+      body: {
+        kind: "org-join",
+        email: "default@acme.com",
+        organizationId: org.id
+      },
+      headers: ownerHeaders
+    });
+    expect((await findInviteRow(auth, created.inviteId))?.role).toBe("user");
+  });
+
   it("canCreateOrgInvites override replaces the permission check", async () => {
     const { auth, org, ownerHeaders } = await setupOrg({
       invite: {
@@ -993,14 +1022,13 @@ describe("uniform redemption flow", () => {
     expect(authed.nextAction).toBe("CONFIRM");
   });
 
-  it("open mode redeem activates: joins the org and merges roles", async () => {
+  it("open mode redeem activates: joins the org, app role stays as-is", async () => {
     const { auth, org, ownerHeaders } = await setupOrg({ open: true });
     const created = await createInvite(auth, {
       body: {
         kind: "org-join",
         email: "activator@acme.com",
-        organizationId: org.id,
-        role: "partner"
+        organizationId: org.id
       },
       headers: ownerHeaders
     });
@@ -1015,7 +1043,7 @@ describe("uniform redemption flow", () => {
       headers
     });
     expect(res.action).toBe("ACCEPTED");
-    expect(res.role).toBe("user,partner");
+    expect(res.role).toBe("user");
     const member = await getMemberRow(auth, user.id, org.id);
     expect(member?.role).toBe("member");
   });

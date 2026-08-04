@@ -826,6 +826,7 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
         emailVerified: opts.autoVerifyPublicInviteEmail,
         role
       });
+      createdUserId = user.id;
       const hash = await ctx.context.password.hash(body.password);
       await ctx.context.internalAdapter.createAccount({
         userId: user.id,
@@ -1204,6 +1205,15 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
           const mode = getMode();
           const kind: InviteKind = ctx.body.kind;
           const type = ctx.body.type;
+          // The app-level role is an admin-only field. org-join creators
+          // are gated by org permission, not app adminship, so honoring
+          // their role would let any org inviter mint app admins.
+          if (kind === "org-join" && ctx.body.role != null) {
+            throw APIError.from(
+              "UNPROCESSABLE_ENTITY",
+              INVITE_ERROR_CODES.ROLE_NOT_ALLOWED_FOR_ORG_JOIN
+            );
+          }
           const role = ctx.body.role ?? opts.defaultRole;
           if (opts.validRoles && !opts.validRoles.includes(role)) {
             throw APIError.from("UNPROCESSABLE_ENTITY", INVITE_ERROR_CODES.INVALID_ROLE);

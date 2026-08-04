@@ -173,6 +173,27 @@ App admins deliberately cannot create `org-join` invites: an organization owns i
 
 No email delivery? Use a public invite with `maxUses: 1`. There is deliberately no option to reveal a private link, because possession of one is proof of mailbox access.
 
+### Verifying public-invite emails
+
+That last table row matters in practice. A private invite token traveled through the recipient's inbox, so accepting it proves mailbox ownership and the user is marked verified. A public invite proves only possession of the link: the accepter can type any email address, so the user is created with `emailVerified: false`.
+
+Verification then happens through Better Auth's standard flow, which this plugin deliberately does not replace. Configure it and public-invite signups are covered automatically:
+
+```ts
+export const auth = betterAuth({
+  emailVerification: {
+    sendVerificationEmail: async ({ user, url }) => {
+      await sendEmail(user.email, "Verify your email", url);
+    },
+    sendOnSignUp: true // also fires for public-invite signups, since they start unverified
+  },
+  // Optional: block sign-in until verified
+  emailAndPassword: { requireEmailVerification: true }
+});
+```
+
+The accepter still gets a session immediately; they verify by clicking the emailed link like any other signup. Set `autoVerifyPublicInviteEmail: true` only when you skip that flow entirely (internal tools, trusted environments). It marks public-invite users verified on the spot, which means anyone holding the link can register an address they do not own.
+
 ---
 
 ## Creating invites
@@ -197,7 +218,7 @@ await auth.api.createInvite({
 // -> { inviteId, expiresAt, token, url }
 ```
 
-An org owner inviting a teammate (note the two roles: `organizationRole` goes to `member.role`, `role` to `user.role`):
+An org owner inviting a teammate (`organizationRole` goes to `member.role`):
 
 ```ts
 await auth.api.createInvite({
@@ -206,12 +227,13 @@ await auth.api.createInvite({
     type: "private",
     email: "dev@acme.com",
     organizationId: org.id,
-    organizationRole: "developer",
-    role: "user"
+    organizationRole: "developer"
   },
   headers: ownerHeaders
 });
 ```
+
+The app-level `role` field is admin-only. `org-join` invites reject it (`ROLE_NOT_ALLOWED_FOR_ORG_JOIN`) and always grant `defaultRole`: org inviters are trusted by their organization, not by the app, so letting them pick `user.role` would let any org owner mint app admins.
 
 Partner onboarding, where the recipient signs up and founds their own organization in one form:
 
@@ -371,7 +393,7 @@ betterEnrollment({
 
   // Security posture
   hashTokens: true,
-  autoVerifyPublicInviteEmail: false,
+  autoVerifyPublicInviteEmail: false, // see "Verifying public-invite emails"
   exposeEmailOnGet: false,
 
   // Who may manage invitations
@@ -513,6 +535,7 @@ import { INVITE_ERROR_CODES } from "@octopi-ai/better-enrollment";
 | `EMAIL_ALREADY_INVITED`                                   | A pending invite already holds that address    |
 | `USER_ALREADY_EXISTS`                                     | That address already has an account            |
 | `INVALID_ROLE`, `ROLE_NO_LONGER_VALID`                    | Role rejected at create, or at redeem          |
+| `ROLE_NOT_ALLOWED_FOR_ORG_JOIN`                           | `org-join` invites cannot set an app role      |
 | `NOT_ALLOWED_TO_MANAGE_INVITES`                           | Failed the admin gate                          |
 | `EMAIL_MISMATCH`, `EMAIL_NOT_VERIFIED`                    | Open-mode activation guards                    |
 | `SEAT_LIMIT_REACHED`                                      | No seats left, at create or at redeem          |

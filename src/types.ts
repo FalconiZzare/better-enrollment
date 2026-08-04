@@ -305,6 +305,10 @@ export const INVITE_ERROR_CODES = {
     "ORG_FIELDS_NOT_ALLOWED",
     "Organization fields are not allowed for this invite kind"
   ),
+  ROLE_NOT_ALLOWED_FOR_ORG_JOIN: err(
+    "ROLE_NOT_ALLOWED_FOR_ORG_JOIN",
+    "org-join invitations cannot set an app role; new members receive the default role"
+  ),
   ORG_NOT_FOUND: err("ORG_NOT_FOUND", "Organization not found"),
   ORG_DISABLED: err("ORG_DISABLED", "This organization has been disabled"),
   ORG_INVITE_NOT_ALLOWED: err(
