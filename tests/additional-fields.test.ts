@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import * as z from "zod";
-import { createInvite, createTestAuth, findUserByEmail, seedAdmin, type TestAuth } from "./helpers";
+import {
+  createInvite,
+  createTestAuth,
+  findUserByEmail,
+  seedAdmin,
+  seedUser,
+  signInHeaders,
+  type TestAuth
+} from "./helpers";
 
 const PASSWORD = "password123";
 
@@ -257,7 +265,7 @@ describe("additionalFields", () => {
     ).rejects.toThrow(/reserved redemption field/);
   });
 
-  it("activation flows skip additional fields entirely", async () => {
+  it("default fields apply to sign-up only: activation flows skip them", async () => {
     const auth = await createTestAuth({
       invite: { mode: "open", additionalFields: { badge: { type: "string" } } },
       auth: { emailAndPassword: { enabled: true, disableSignUp: false } }
@@ -273,7 +281,62 @@ describe("additionalFields", () => {
     expect(info.requiredFields).toEqual([]);
     expect(info.additionalFields).toEqual({});
 
+    // Signed in, the step is CONFIRM; a SIGN_UP-only field stays absent.
+    const confirmInfo = await auth.api.getInvite({ query: { token }, headers });
+    expect(confirmInfo.nextAction).toBe("CONFIRM");
+    expect(confirmInfo.requiredFields).toEqual([]);
+    expect(confirmInfo.additionalFields).toEqual({});
+
     const res = await auth.api.activateInvite({ body: { token }, headers });
     expect(res.action).toBe("ACCEPTED");
+  });
+
+  it("CONFIRM-action fields are listed by get and collected at activation", async () => {
+    const auth = await createTestAuth({
+      invite: {
+        mode: "open",
+        additionalFields: {
+          department: { type: "string", actions: ["SIGN_UP", "CONFIRM"] },
+          nickname: { type: "string", required: false, actions: ["CONFIRM"] },
+          plan: { type: "string", defaultValue: "free", actions: ["SIGN_UP", "CONFIRM"] }
+        }
+      },
+      auth: { emailAndPassword: { enabled: true, disableSignUp: false } }
+    });
+    const headers = await seedAdmin(auth);
+    const { token } = await createInvite(auth, {
+      body: { type: "public", role: "partner" },
+      headers
+    });
+
+    await seedUser(auth, { email: "member@test.com", password: PASSWORD });
+    const memberHeaders = await signInHeaders(auth, "member@test.com", PASSWORD);
+
+    const info = await auth.api.getInvite({ query: { token }, headers: memberHeaders });
+    expect(info.nextAction).toBe("CONFIRM");
+    expect(info.requiredFields).toEqual(["department"]);
+    expect(info.optionalFields).toEqual(["nickname", "plan"]);
+    expect(info.additionalFields).toEqual({
+      department: { type: "string", required: true },
+      nickname: { type: "string", required: false },
+      plan: { type: "string", required: false }
+    });
+
+    // Required confirm field missing: rejected before the use is claimed.
+    expect(
+      await errCode(auth.api.activateInvite({ body: { token }, headers: memberHeaders }))
+    ).toBe("ADDITIONAL_FIELD_REQUIRED");
+
+    const res = await auth.api.redeemInvite({
+      body: { token, department: "sales", nickname: "Mem" },
+      headers: memberHeaders
+    });
+    expect(res.action).toBe("ACCEPTED");
+    const row = await userRow(auth, "member@test.com");
+    expect(row?.department).toBe("sales");
+    expect(row?.nickname).toBe("Mem");
+    // Defaults never apply on confirm: the update must not clobber
+    // existing user data with "free".
+    expect(row?.plan ?? null).toBeNull();
   });
 });

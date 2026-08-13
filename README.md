@@ -201,13 +201,14 @@ await authClient.invite.redeem({ token, password, name, email });
 await authClient.signIn.email({ email, password });
 ```
 
-Sign-up redemptions always collect `password` and `name`; public invites add `email`, and `org-create` adds `organizationName` and `organizationSlug`. Need more than that, say a department or a referral code? Declare [additional fields](https://better-enrollment.octopi.ai/docs/options#additional-fields) with a type, requiredness, and an optional zod validator, and they flow through `requiredFields` / `optionalFields`, the redeem body, and onto the user row:
+Sign-up redemptions always collect `password` and `name`; public invites add `email`, and `org-create` adds `organizationName` and `organizationSlug`. Need more than that, say a department or a referral code? Declare [additional fields](https://better-enrollment.octopi.ai/docs/options#additional-fields) with a type, requiredness, an optional zod validator, and the steps that collect them (`SIGN_UP` by default, `CONFIRM` for signed-in activations), and they flow through `requiredFields` / `optionalFields`, the redeem body, and onto the user row:
 
 ```ts
 betterEnrollment({
   additionalFields: {
     department: { type: "string" },
-    referral: { type: "string", required: false }
+    referral: { type: "string", required: false },
+    team: { type: "string", actions: ["SIGN_UP", "CONFIRM"] }
   }
 });
 ```

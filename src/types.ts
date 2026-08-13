@@ -86,12 +86,25 @@ export interface StandardSchemaLike {
 export type InviteAdditionalFieldType = "string" | "number" | "boolean" | "date";
 
 /**
+ * The two nextActions that render a form and may carry additional
+ * fields. SIGN_IN and the terminal state collect nothing.
+ */
+export type InviteFieldAction = "SIGN_UP" | "CONFIRM";
+
+/**
  * One extra field collected at redemption. Mirrors Better Auth's
  * additionalFields attribute shape: type, required (default true),
  * defaultValue, and an optional standard-schema input validator.
  */
 export interface InviteAdditionalField {
   type: InviteAdditionalFieldType;
+  /**
+   * Which redemption steps collect this field. "SIGN_UP" is the
+   * account-creating accept flow; "CONFIRM" is a signed-in activation.
+   * Default ["SIGN_UP"]. The list is exact, never additive: ["CONFIRM"]
+   * means confirm only; name both steps to collect on both forms.
+   */
+  actions?: InviteFieldAction[];
   /**
    * Whether redemption must provide a value. Default true, matching
    * Better Auth. A field with a defaultValue never fails this check.

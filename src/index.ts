@@ -21,6 +21,7 @@ import {
   type BetterEnrollmentOptions,
   type Invite,
   type InviteAdditionalField,
+  type InviteFieldAction,
   type InviteKind,
   type InviteMode,
   type InviteType,
@@ -159,14 +160,20 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
   const isEffectivelyRequired = (field: InviteAdditionalField): boolean =>
     field.required !== false && field.defaultValue === undefined;
 
+  const fieldAppliesTo = (field: InviteAdditionalField, action: InviteFieldAction): boolean =>
+    (field.actions ?? ["SIGN_UP"]).includes(action);
+
   /**
-   * Validates the redeem body against the configured additional fields,
-   * mirroring Better Auth's parseInputData semantics: defaults applied
-   * when absent, required enforced, type checked (dates accept ISO
-   * strings), then the standard-schema validator. Returns only declared
-   * keys; everything else in the body is ignored.
+   * Validates the redeem body against the additional fields configured
+   * for the given step, mirroring Better Auth's parseInputData semantics:
+   * defaults applied when absent, required enforced, type checked (dates
+   * accept ISO strings), then the standard-schema validator. Returns only
+   * declared keys; everything else in the body is ignored.
    */
-  function parseAdditionalFields(body: Record<string, unknown>): Record<string, unknown> {
+  function parseAdditionalFields(
+    body: Record<string, unknown>,
+    action: InviteFieldAction
+  ): Record<string, unknown> {
     const invalid = (key: string, detail: string) =>
       APIError.from("BAD_REQUEST", {
         ...INVITE_ERROR_CODES.ADDITIONAL_FIELD_INVALID,
@@ -174,11 +181,16 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
       });
     const out: Record<string, unknown> = {};
     for (const [key, field] of Object.entries(additionalFieldDefs)) {
+      if (!fieldAppliesTo(field, action)) continue;
       let value = body[key];
       if (value === undefined || value === null) {
         if (field.defaultValue !== undefined) {
-          out[key] =
-            typeof field.defaultValue === "function" ? field.defaultValue() : field.defaultValue;
+          // Only sign-up creates the row; a confirm updates an existing
+          // user, where writing the default would clobber their data.
+          if (action === "SIGN_UP") {
+            out[key] =
+              typeof field.defaultValue === "function" ? field.defaultValue() : field.defaultValue;
+          }
         } else if (field.required !== false) {
           throw APIError.from("BAD_REQUEST", {
             ...INVITE_ERROR_CODES.ADDITIONAL_FIELD_REQUIRED,
@@ -823,7 +835,7 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
     if (!name) {
       throw APIError.from("BAD_REQUEST", INVITE_ERROR_CODES.NAME_REQUIRED);
     }
-    const extraFields = parseAdditionalFields(body);
+    const extraFields = parseAdditionalFields(body, "SIGN_UP");
 
     const pre = await assertOrgRedeemable(ctx, invite, body);
 
@@ -1063,6 +1075,9 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
     }
 
     const role = await resolveRole(invite);
+    // Confirm-step fields validate before the claim, so bad input never
+    // consumes a use.
+    const extraFields = parseAdditionalFields(body, "CONFIRM");
     const pre = await assertOrgRedeemable(ctx, invite, body);
     const claimed = await claimUse(ctx, invite);
     if (!claimed) {
@@ -1074,7 +1089,8 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
       )) as BannableUser | null;
       const merged = mergeRoles(current?.role, role);
       const updated = await ctx.context.internalAdapter.updateUser(session.user.id, {
-        role: merged
+        role: merged,
+        ...extraFields
       });
       const org = await applyOrgEffects(ctx, claimed, updated ?? session.user, pre);
       await recordUse(ctx, invite, session.user.id, session.user.email);
@@ -1852,7 +1868,9 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
         "/invite/activate",
         {
           method: "POST",
-          body: z.object({
+          // Loose: CONFIRM-step additional fields ride alongside the fixed
+          // keys and are validated by parseAdditionalFields.
+          body: z.looseObject({
             token: z.string().min(1),
             organizationName: z.string().max(200).optional(),
             organizationSlug: z.string().max(200).optional()
@@ -1941,12 +1959,19 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
               nextAction = session ? "CONFIRM" : "SIGN_IN";
             }
           }
+          // Of the four next actions, only SIGN_UP and CONFIRM render a
+          // form; SIGN_IN and the terminal state collect nothing.
+          const formAction =
+            nextAction === "SIGN_UP" || nextAction === "CONFIRM" ? nextAction : null;
           const requiredFields: string[] = [];
           const optionalFields: string[] = [];
           if (nextAction === "SIGN_UP") {
             requiredFields.push("password", "name");
             if (invite.type === "public") requiredFields.push("email");
+          }
+          if (formAction) {
             for (const [key, field] of Object.entries(additionalFieldDefs)) {
+              if (!fieldAppliesTo(field, formAction)) continue;
               (isEffectivelyRequired(field) ? requiredFields : optionalFields).push(key);
             }
           }
@@ -1954,15 +1979,16 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
             requiredFields.push("organizationName", "organizationSlug");
           }
           // Types let the page render the right input for each extra field.
-          const additionalFields =
-            nextAction === "SIGN_UP"
-              ? Object.fromEntries(
-                  Object.entries(additionalFieldDefs).map(([key, field]) => [
+          const additionalFields = formAction
+            ? Object.fromEntries(
+                Object.entries(additionalFieldDefs)
+                  .filter(([, field]) => fieldAppliesTo(field, formAction))
+                  .map(([key, field]) => [
                     key,
                     { type: field.type, required: isEffectivelyRequired(field) }
                   ])
-                )
-              : {};
+              )
+            : {};
 
           return ctx.json({
             type: invite.type,
