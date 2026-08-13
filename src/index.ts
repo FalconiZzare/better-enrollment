@@ -20,6 +20,7 @@ import {
   INVITE_ERROR_CODES,
   type BetterEnrollmentOptions,
   type Invite,
+  type InviteAdditionalField,
   type InviteKind,
   type InviteMode,
   type InviteType,
@@ -60,7 +61,29 @@ type RedeemBody = {
   email?: string;
   organizationName?: string;
   organizationSlug?: string;
-};
+} & Record<string, unknown>;
+
+/**
+ * Body keys the redeem flow owns, plus user columns no invitee may set.
+ * additionalFields may not shadow any of them.
+ */
+const RESERVED_FIELD_NAMES = new Set([
+  "token",
+  "password",
+  "name",
+  "email",
+  "organizationName",
+  "organizationSlug",
+  "id",
+  "emailVerified",
+  "image",
+  "role",
+  "banned",
+  "banReason",
+  "banExpires",
+  "createdAt",
+  "updatedAt"
+]);
 
 type OrgPrecheck = {
   org?: OrganizationRecord | null;
@@ -121,6 +144,79 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
     ...options
   };
   const orgOpts = opts.organization;
+
+  const additionalFieldDefs: Record<string, InviteAdditionalField> = opts.additionalFields ?? {};
+  for (const key of Object.keys(additionalFieldDefs)) {
+    if (RESERVED_FIELD_NAMES.has(key)) {
+      throw new Error(
+        `better-enrollment: additional field "${key}" collides with a reserved redemption field`
+      );
+    }
+  }
+
+  // A required field with a defaultValue can never fail the required
+  // check, so the invite page should render it as optional.
+  const isEffectivelyRequired = (field: InviteAdditionalField): boolean =>
+    field.required !== false && field.defaultValue === undefined;
+
+  /**
+   * Validates the redeem body against the configured additional fields,
+   * mirroring Better Auth's parseInputData semantics: defaults applied
+   * when absent, required enforced, type checked (dates accept ISO
+   * strings), then the standard-schema validator. Returns only declared
+   * keys; everything else in the body is ignored.
+   */
+  function parseAdditionalFields(body: Record<string, unknown>): Record<string, unknown> {
+    const invalid = (key: string, detail: string) =>
+      APIError.from("BAD_REQUEST", {
+        ...INVITE_ERROR_CODES.ADDITIONAL_FIELD_INVALID,
+        message: `${key} ${detail}`
+      });
+    const out: Record<string, unknown> = {};
+    for (const [key, field] of Object.entries(additionalFieldDefs)) {
+      let value = body[key];
+      if (value === undefined || value === null) {
+        if (field.defaultValue !== undefined) {
+          out[key] =
+            typeof field.defaultValue === "function" ? field.defaultValue() : field.defaultValue;
+        } else if (field.required !== false) {
+          throw APIError.from("BAD_REQUEST", {
+            ...INVITE_ERROR_CODES.ADDITIONAL_FIELD_REQUIRED,
+            message: `${key} is required`
+          });
+        }
+        continue;
+      }
+      if (field.type === "date" && (typeof value === "string" || typeof value === "number")) {
+        const parsed = new Date(value);
+        if (Number.isNaN(parsed.getTime())) throw invalid(key, "must be a valid date");
+        value = parsed;
+      }
+      const typeOk =
+        field.type === "string"
+          ? typeof value === "string"
+          : field.type === "number"
+            ? typeof value === "number" && Number.isFinite(value)
+            : field.type === "boolean"
+              ? typeof value === "boolean"
+              : value instanceof Date;
+      if (!typeOk) throw invalid(key, `must be a ${field.type}`);
+      if (field.validator?.input) {
+        const result = field.validator.input["~standard"].validate(value);
+        if (result instanceof Promise) {
+          throw new APIError("INTERNAL_SERVER_ERROR", {
+            message: "better-enrollment: async field validators are not supported"
+          });
+        }
+        if ("issues" in result && result.issues) {
+          throw invalid(key, result.issues[0]?.message ?? "failed validation");
+        }
+        value = (result as { value: unknown }).value;
+      }
+      out[key] = value;
+    }
+    return out;
+  }
 
   const state = {
     mode: (opts.mode === "auto" ? null : opts.mode) as InviteMode | null,
@@ -721,6 +817,13 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
         message: `Password must be between ${minPasswordLength} and ${maxPasswordLength} characters`
       });
     }
+    // The accept flow exists to populate the profile; a nameless profile
+    // defeats it. Activation flows never reach this path.
+    const name = body.name?.trim();
+    if (!name) {
+      throw APIError.from("BAD_REQUEST", INVITE_ERROR_CODES.NAME_REQUIRED);
+    }
+    const extraFields = parseAdditionalFields(body);
 
     const pre = await assertOrgRedeemable(ctx, invite, body);
 
@@ -788,7 +891,8 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
           (await ctx.context.internalAdapter.updateUser(target.id, {
             emailVerified: true,
             role,
-            ...(body.name ? { name: body.name } : {})
+            name,
+            ...extraFields
           })) ?? target;
         const org = await applyOrgEffects(ctx, claimed, updated, pre);
         await recordUse(ctx, invite, target.id, target.email);
@@ -842,9 +946,10 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
     try {
       const user = await ctx.context.internalAdapter.createUser({
         email,
-        name: body.name ?? "",
+        name,
         emailVerified: opts.autoVerifyPublicInviteEmail,
-        role
+        role,
+        ...extraFields
       });
       createdUserId = user.id;
       const hash = await ctx.context.password.hash(body.password);
@@ -1295,7 +1400,7 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
 
   return {
     id: "better-enrollment",
-    schema: buildSchema(!!orgOpts),
+    schema: buildSchema(!!orgOpts, additionalFieldDefs),
     $ERROR_CODES: INVITE_ERROR_CODES,
 
     init(ctx: AuthContext) {
@@ -1724,7 +1829,9 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
         "/invite/accept",
         {
           method: "POST",
-          body: z.object({
+          // Loose: configured additional fields ride alongside the fixed
+          // keys and are validated by parseAdditionalFields.
+          body: z.looseObject({
             token: z.string().min(1),
             password: z.string().min(1),
             name: z.string().max(200).optional(),
@@ -1763,7 +1870,9 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
         "/invite/redeem",
         {
           method: "POST",
-          body: z.object({
+          // Loose: configured additional fields ride alongside the fixed
+          // keys and are validated by parseAdditionalFields.
+          body: z.looseObject({
             token: z.string().min(1),
             password: z.string().min(1).optional(),
             name: z.string().max(200).optional(),
@@ -1833,13 +1942,27 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
             }
           }
           const requiredFields: string[] = [];
+          const optionalFields: string[] = [];
           if (nextAction === "SIGN_UP") {
-            requiredFields.push("password");
+            requiredFields.push("password", "name");
             if (invite.type === "public") requiredFields.push("email");
+            for (const [key, field] of Object.entries(additionalFieldDefs)) {
+              (isEffectivelyRequired(field) ? requiredFields : optionalFields).push(key);
+            }
           }
           if (invite.kind === "org-create" && nextAction) {
             requiredFields.push("organizationName", "organizationSlug");
           }
+          // Types let the page render the right input for each extra field.
+          const additionalFields =
+            nextAction === "SIGN_UP"
+              ? Object.fromEntries(
+                  Object.entries(additionalFieldDefs).map(([key, field]) => [
+                    key,
+                    { type: field.type, required: isEffectivelyRequired(field) }
+                  ])
+                )
+              : {};
 
           return ctx.json({
             type: invite.type,
@@ -1854,6 +1977,8 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
             organizationName,
             nextAction,
             requiredFields,
+            optionalFields,
+            additionalFields,
             expiresAt: invite.expiresAt,
             maxUses: invite.maxUses,
             useCount: invite.useCount,
