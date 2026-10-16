@@ -1323,6 +1323,40 @@ describe("platform controls", () => {
     expect(res.organization?.id).toBe(org.id);
   });
 
+  it("disable freezes invite management for org members; app admins keep moderating", async () => {
+    const { auth, org, ownerHeaders, adminHeaders } = await setupOrg();
+    const pending = await createInvite(auth, {
+      body: { kind: "org-join", email: "held@acme.com", organizationId: org.id },
+      headers: ownerHeaders
+    });
+    await api(auth).disableOrg({
+      body: { organizationId: org.id },
+      headers: adminHeaders
+    });
+
+    const frozen = [
+      api(auth).listInvites({ query: { organizationId: org.id }, headers: ownerHeaders }),
+      api(auth).orgInviteUsage({ query: { organizationId: org.id }, headers: ownerHeaders }),
+      api(auth).resendInvite({ body: { inviteId: pending.inviteId }, headers: ownerHeaders }),
+      api(auth).revokeInvite({ body: { inviteId: pending.inviteId }, headers: ownerHeaders }),
+      api(auth).deleteInvite({ body: { inviteId: pending.inviteId }, headers: ownerHeaders })
+    ];
+    for (const call of frozen) {
+      expect(await errCode(call)).toBe("ORG_DISABLED");
+    }
+
+    const listed = await api(auth).listInvites({
+      query: { organizationId: org.id },
+      headers: adminHeaders
+    });
+    expect(listed.invites.map((i: { id: string }) => i.id)).toContain(pending.inviteId);
+    const revoked = await api(auth).revokeInvite({
+      body: { inviteId: pending.inviteId },
+      headers: adminHeaders
+    });
+    expect(revoked.revoked).toBe(true);
+  });
+
   it("disable also covers slug and active-organization addressing", async () => {
     const { auth, org, ownerHeaders, adminHeaders } = await setupOrg();
     // Active org set while the org is still enabled.

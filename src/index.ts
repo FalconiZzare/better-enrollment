@@ -683,6 +683,11 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
     if (!org || !member || !allowed) {
       throw APIError.from("FORBIDDEN", INVITE_ERROR_CODES.ORG_INVITE_NOT_ALLOWED);
     }
+    // After the membership check, so disabled state never leaks to outsiders. App admins
+    // never reach this gate and keep moderating a disabled org's invites.
+    if (org.disabledAt) {
+      throw APIError.from("FORBIDDEN", INVITE_ERROR_CODES.ORG_DISABLED);
+    }
     return { org, member };
   }
 
