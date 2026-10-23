@@ -205,7 +205,7 @@ await authClient.invite.redeem({ token, password, name, email });
 await authClient.signIn.email({ email, password });
 ```
 
-Sign-up redemptions always collect `password` and `name`; public invites add `email`, and `org-create` adds `organizationName` and `organizationSlug`. Need more than that, say a department or a referral code? Declare [additional fields](https://better-enrollment.octopi.ai/docs/options#additional-fields) with a type, requiredness, an optional zod validator, and the steps that collect them (`SIGN_UP` by default, `CONFIRM` for signed-in activations), and they flow through `requiredFields` / `optionalFields`, the redeem body, and onto the user row:
+Sign-up redemptions always collect `password` and `name`; public invites add `email`, and `org-create` adds `organizationName` and `organizationSlug` unless the invite presets the organization. Need more than that, say a department or a referral code? Declare [additional fields](https://better-enrollment.octopi.ai/docs/options#additional-fields) with a type, requiredness, an optional zod validator, and the steps that collect them (`SIGN_UP` by default, `CONFIRM` for signed-in activations), and they flow through `requiredFields` / `optionalFields`, the redeem body, and onto the user row:
 
 ```ts
 betterEnrollment({
@@ -238,6 +238,8 @@ plugins: [
 - **Seat limits** resolve `resolveSeatLimit(org)` → `seatLimit` column → `defaultSeatLimit` → unlimited. Seats used = members + pending invite reservations, enforced at creation and again at redemption.
 - **Platform controls** (app-admin only): disable, enable, and delete organizations; `banMembers: true` bans every member app-wide for fraud takedowns.
 - **Org sovereignty**: app admins deliberately cannot create `org-join` invites; only the org invites into itself.
+- **Preset organization**: an `org-create` invite may fix the new org up front with `organization: { name, slug? }`. The founder then enters no org fields (any they send are ignored), `invite.get` and the invitation emails carry the name, and the slug is the preset one or derived from the name, with a short random suffix when it is taken.
+- **`beforeOrgCreate`**: runs just before an `org-create` redemption founds its org. Return fields (your org plugin `additionalFields`) to store them on the new org, or throw an `APIError` to refuse the redemption; the invite stays pending.
 - Setting the active organization after an org invite is your app's job, at sign-in or via a switcher.
 
 Permissions table, seat math, and platform controls: [Organizations](https://better-enrollment.octopi.ai/docs/organizations).
@@ -253,7 +255,7 @@ authClient.invite.redeem({ token, ... });
 
 // Management (admin- or org-gated)
 authClient.invite.create({ ... });
-authClient.invite.list({ ... });
+authClient.invite.list({ cursor?, limit?, ... }); // -> { invites, total, nextCursor }
 authClient.invite.resend({ inviteId }); // rotate the token, invalidate the old link, redeliver
 authClient.invite.revoke({ inviteId });
 authClient.invite.delete({ inviteId });
@@ -266,6 +268,8 @@ authClient.invite.org.enable({ organizationId });
 authClient.invite.org.delete({ organizationId, banMembers? });
 ```
 
+`invite.list` pages newest first. Pass the returned `nextCursor` back as `cursor` for stable keyset paging (it is `null` on the last page); `page` still offsets when no cursor is given.
+
 Server-only, never mounted as HTTP routes: headless invite creation for cron jobs and system integrations, plus batched cleanup for your scheduler.
 
 ```ts
@@ -276,6 +280,11 @@ await auth.api.createSystemInvite({
     // optional; userId attributes the invite to a real user
     inviter: { name: "Billing", email: "billing@acme.com", userId: actingUser.id }
   }
+});
+
+// Founds "Acme" (slug derived) with the redeemer as owner
+await auth.api.createSystemInvite({
+  body: { kind: "org-create", email: "founder@acme.com", organization: { name: "Acme" } }
 });
 
 const { deleted } = await auth.api.cleanupExpiredInvites();
