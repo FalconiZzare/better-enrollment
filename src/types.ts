@@ -139,6 +139,14 @@ export interface PrivateInvitationEmailData {
   inviterName: string;
   inviterEmail: string;
   organizationName: string | null;
+  /** The invite row this email is for. */
+  inviteId: string;
+  /** Set for org-join invites; null for app and org-create. */
+  organizationId: string | null;
+  /** The org role an org-join invite grants. */
+  organizationRole: string | null;
+  /** The team an org-join invite adds the member to, if any. */
+  teamId: string | null;
   expiresAt: Date | null;
 }
 
@@ -151,6 +159,14 @@ export interface PublicInvitationData {
   inviterName: string;
   inviterEmail: string;
   organizationName: string | null;
+  /** The invite row this email is for. */
+  inviteId: string;
+  /** Set for org-join invites; null for app and org-create. */
+  organizationId: string | null;
+  /** The org role an org-join invite grants. */
+  organizationRole: string | null;
+  /** The team an org-join invite adds the member to, if any. */
+  teamId: string | null;
   maxUses: number | null;
   expiresAt: Date | null;
 }

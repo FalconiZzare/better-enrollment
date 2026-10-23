@@ -1,6 +1,7 @@
 import { organization } from "better-auth/plugins";
 import { describe, expect, it } from "vitest";
 import type { BetterEnrollmentOptions } from "../src";
+import type { PrivateInvitationEmailData, PublicInvitationData } from "../src/types";
 import { roleGate } from "../src";
 import {
   createInvite,
@@ -1937,5 +1938,74 @@ describe("existing-user activation invites (invite-only)", () => {
     });
     expect(res.action).toBe("ACCEPTED");
     expect(await getMemberRow(auth, existing.id, org.id)).toBeTruthy();
+  });
+});
+
+describe("email delivery context", () => {
+  it("private org-join emails carry the invite id, org id, org role and team, on create and resend", async () => {
+    const delivered: PrivateInvitationEmailData[] = [];
+    const { auth, org, ownerHeaders } = await setupOrg({
+      invite: {
+        sendPrivateInvitation: async (data) => {
+          delivered.push(data);
+        }
+      }
+    });
+    const team = await api(auth).createTeam({
+      body: { name: "Engineering", organizationId: org.id },
+      headers: ownerHeaders
+    });
+    const created = await createInvite(auth, {
+      body: {
+        kind: "org-join",
+        email: "eng@acme.com",
+        organizationId: org.id,
+        organizationRole: "admin",
+        teamId: team.id
+      },
+      headers: ownerHeaders
+    });
+    await api(auth).resendInvite({ body: { inviteId: created.inviteId }, headers: ownerHeaders });
+
+    expect(delivered).toHaveLength(2);
+    for (const data of delivered) {
+      expect(data.inviteId).toBe(created.inviteId);
+      expect(data.organizationId).toBe(org.id);
+      expect(data.organizationRole).toBe("admin");
+      expect(data.teamId).toBe(team.id);
+      expect(data.organizationName).toBe("Acme");
+    }
+  });
+
+  it("public org-join invites carry the same context; app invites carry nulls", async () => {
+    const publicData: PublicInvitationData[] = [];
+    const privateData: PrivateInvitationEmailData[] = [];
+    const { auth, org, ownerHeaders, adminHeaders } = await setupOrg({
+      invite: {
+        sendPublicInvitation: async (data) => {
+          publicData.push(data);
+        },
+        sendPrivateInvitation: async (data) => {
+          privateData.push(data);
+        }
+      }
+    });
+    const shared = await createInvite(auth, {
+      body: { kind: "org-join", type: "public", organizationId: org.id, maxUses: 3 },
+      headers: ownerHeaders
+    });
+    expect(publicData[0]?.inviteId).toBe(shared.inviteId);
+    expect(publicData[0]?.organizationId).toBe(org.id);
+    expect(publicData[0]?.organizationRole).toBe("member");
+    expect(publicData[0]?.teamId).toBeNull();
+
+    const app = await createInvite(auth, {
+      body: { email: "app@test.com" },
+      headers: adminHeaders
+    });
+    expect(privateData[0]?.inviteId).toBe(app.inviteId);
+    expect(privateData[0]?.organizationId).toBeNull();
+    expect(privateData[0]?.organizationRole).toBeNull();
+    expect(privateData[0]?.teamId).toBeNull();
   });
 });
