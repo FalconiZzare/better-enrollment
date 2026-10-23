@@ -34,7 +34,10 @@ import {
 } from "./types";
 import { setSessionCookie } from "better-auth/cookies";
 import {
+  compareNewestFirst,
+  decodeCursor,
   deriveStatus,
+  encodeCursor,
   isExpired,
   maskEmail,
   mergeRoles,
@@ -105,6 +108,10 @@ type OrgPrecheck = {
 };
 
 const SLUG_SUFFIX_ATTEMPTS = 5;
+
+type AdapterWhere = NonNullable<
+  Parameters<GenericEndpointContext["context"]["adapter"]["findMany"]>[0]["where"]
+>;
 
 /** The magic-link plugin config this plugin reads off the plugin object. */
 type MagicLinkLikeOptions = {
@@ -1020,6 +1027,65 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
       offset += DB_PAGE;
     }
     return banned;
+  }
+
+  /**
+   * One page newest first by (createdAt, id). Adapters sort by a single
+   * field and do not nest AND/OR, so createdAt ties are read with their
+   * own id-sorted query. Equality is gte+lte: some adapters compare dates
+   * by reference.
+   */
+  async function keysetInvitePage(
+    ctx: GenericEndpointContext,
+    where: AdapterWhere,
+    limit: number,
+    cursor: { createdAt: Date; id: string } | null
+  ): Promise<{ invites: Invite[]; hasMore: boolean }> {
+    const sameInstant = (at: Date): AdapterWhere => [
+      { field: "createdAt", value: at, operator: "gte" },
+      { field: "createdAt", value: at, operator: "lte" }
+    ];
+    const page: Invite[] = [];
+    if (cursor) {
+      const ties = await ctx.context.adapter.findMany<Invite>({
+        model: "invite",
+        where: [
+          ...where,
+          ...sameInstant(cursor.createdAt),
+          { field: "id", value: cursor.id, operator: "lt" }
+        ],
+        limit: limit + 1,
+        sortBy: { field: "id", direction: "desc" }
+      });
+      if (ties.length > limit) return { invites: ties.slice(0, limit), hasMore: true };
+      page.push(...ties);
+    }
+    const remaining = limit - page.length;
+    const older = await ctx.context.adapter.findMany<Invite>({
+      model: "invite",
+      where: cursor
+        ? [...where, { field: "createdAt", value: cursor.createdAt, operator: "lt" }]
+        : where,
+      limit: remaining + 1,
+      sortBy: { field: "createdAt", direction: "desc" }
+    });
+    if (older.length <= remaining) {
+      return { invites: [...page, ...older.sort(compareNewestFirst)], hasMore: false };
+    }
+    if (remaining === 0) return { invites: page, hasMore: true };
+    // Rows newer than the boundary instant all fit; the boundary's ties
+    // are refetched in id order so the cursor resumes exactly after them.
+    const boundary = new Date(older[remaining - 1]!.createdAt);
+    const head = older
+      .filter((i) => new Date(i.createdAt).getTime() > boundary.getTime())
+      .sort(compareNewestFirst);
+    const tail = await ctx.context.adapter.findMany<Invite>({
+      model: "invite",
+      where: [...where, ...sameInstant(boundary)],
+      limit: remaining - head.length,
+      sortBy: { field: "id", direction: "desc" }
+    });
+    return { invites: [...page, ...head, ...tail], hasMore: true };
   }
 
   async function requireOrgFeatures(): Promise<void> {
@@ -2510,6 +2576,7 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
             kind: z.enum(["app", "org-join", "org-create"]).optional(),
             email: z.string().max(200).optional(),
             organizationId: z.string().optional(),
+            cursor: z.string().min(1).max(500).optional(),
             page: z.coerce.number().int().positive().default(1),
             limit: z.coerce.number().int().positive().max(100).default(20)
           })
@@ -2555,16 +2622,28 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
             );
             where.push({ field: "organizationId", value: access.org.id });
           }
-          const [invites, total] = await Promise.all([
-            ctx.context.adapter.findMany<Invite>({
-              model: "invite",
-              where,
-              limit: ctx.query.limit,
-              offset: (ctx.query.page - 1) * ctx.query.limit,
-              sortBy: { field: "createdAt", direction: "desc" }
-            }),
+          const cursor = ctx.query.cursor ? decodeCursor(ctx.query.cursor) : null;
+          if (ctx.query.cursor && !cursor) {
+            throw APIError.from("BAD_REQUEST", INVITE_ERROR_CODES.INVALID_CURSOR);
+          }
+          const { limit, page } = ctx.query;
+          const [{ invites, hasMore }, total] = await Promise.all([
+            // Offset only for an explicit later page without a cursor; the
+            // first page is keyset so its nextCursor continues exactly.
+            !cursor && page > 1
+              ? ctx.context.adapter
+                  .findMany<Invite>({
+                    model: "invite",
+                    where,
+                    limit: limit + 1,
+                    offset: (page - 1) * limit,
+                    sortBy: { field: "createdAt", direction: "desc" }
+                  })
+                  .then((rows) => ({ invites: rows.slice(0, limit), hasMore: rows.length > limit }))
+              : keysetInvitePage(ctx, where, limit, cursor),
             ctx.context.adapter.count({ model: "invite", where })
           ]);
+          const last = invites[invites.length - 1];
           const uses = invites.length
             ? await ctx.context.adapter.findMany<InviteUse>({
                 model: "inviteUse",
@@ -2593,8 +2672,9 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
               };
             }),
             total,
-            page: ctx.query.page,
-            limit: ctx.query.limit
+            page,
+            limit,
+            nextCursor: hasMore && last ? encodeCursor(last) : null
           });
         }
       ),

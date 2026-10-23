@@ -480,5 +480,6 @@ export const INVITE_ERROR_CODES = {
     "ORG_INFO_REQUIRED",
     "organizationName and organizationSlug are required to accept this invitation"
   ),
-  ORG_SLUG_TAKEN: err("ORG_SLUG_TAKEN", "An organization with this slug already exists")
+  ORG_SLUG_TAKEN: err("ORG_SLUG_TAKEN", "An organization with this slug already exists"),
+  INVALID_CURSOR: err("INVALID_CURSOR", "The pagination cursor is invalid")
 } as const;
