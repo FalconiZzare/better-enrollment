@@ -40,6 +40,7 @@ import {
   mergeRoles,
   reservedSeats,
   sha256Base64Url,
+  slugify,
   splitRoles,
   storedTokenValue
 } from "./utils";
@@ -97,7 +98,13 @@ const RESERVED_FIELD_NAMES = new Set([
 type OrgPrecheck = {
   org?: OrganizationRecord | null;
   orgInput?: { name: string; slug: string };
+  /** The org name and slug came from the invite, not the redeemer. */
+  preset?: boolean;
+  /** Fields returned by beforeOrgCreate, merged into the org row. */
+  orgFields?: Record<string, unknown>;
 };
+
+const SLUG_SUFFIX_ATTEMPTS = 5;
 
 /** The magic-link plugin config this plugin reads off the plugin object. */
 type MagicLinkLikeOptions = {
@@ -773,6 +780,12 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
       if (!orgEnabled()) {
         throw APIError.from("BAD_REQUEST", INVITE_ERROR_CODES.INVITE_NOT_FOUND);
       }
+      if (invite.presetOrganizationName) {
+        // The inviter fixed the org; redeem body org fields are ignored.
+        const name = invite.presetOrganizationName;
+        const slug = await availableSlug(ctx, invite.presetOrganizationSlug ?? slugify(name));
+        return { orgInput: { name, slug }, preset: true };
+      }
       const name = body.organizationName?.trim();
       const slug = body.organizationSlug?.trim().toLowerCase();
       if (!name || !slug) {
@@ -788,6 +801,74 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
       return { orgInput: { name, slug } };
     }
     return {};
+  }
+
+  async function slugTaken(ctx: GenericEndpointContext, slug: string): Promise<boolean> {
+    const existing = await ctx.context.adapter.findOne<OrganizationRecord>({
+      model: "organization",
+      where: [{ field: "slug", value: slug }]
+    });
+    return !!existing;
+  }
+
+  const suffixed = (base: string) => `${base}-${generateRandomString(6, "a-z", "0-9")}`;
+
+  // A preset invite cannot ask the redeemer for another slug, so a taken
+  // one gets a random suffix instead of failing the redemption.
+  async function availableSlug(ctx: GenericEndpointContext, base: string): Promise<string> {
+    if (!(await slugTaken(ctx, base))) return base;
+    for (let i = 0; i < SLUG_SUFFIX_ATTEMPTS; i++) {
+      const candidate = suffixed(base);
+      if (!(await slugTaken(ctx, candidate))) return candidate;
+    }
+    throw APIError.from("CONFLICT", INVITE_ERROR_CODES.ORG_SLUG_TAKEN);
+  }
+
+  async function runBeforeOrgCreate(
+    invite: Invite,
+    user: User,
+    pre: OrgPrecheck
+  ): Promise<OrgPrecheck> {
+    if (invite.kind !== "org-create" || !pre.orgInput || !orgOpts?.beforeOrgCreate) return pre;
+    const fields = await orgOpts.beforeOrgCreate({
+      invite,
+      user,
+      organization: { ...pre.orgInput }
+    });
+    return fields ? { ...pre, orgFields: fields } : pre;
+  }
+
+  async function createFoundedOrg(
+    ctx: GenericEndpointContext,
+    invite: Invite,
+    input: { name: string; slug: string },
+    pre: OrgPrecheck,
+    now: Date
+  ): Promise<OrganizationRecord> {
+    const { id: _id, ...orgFields } = pre.orgFields ?? {};
+    let slug = input.slug;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await ctx.context.adapter.create<Omit<OrganizationRecord, "id">, OrganizationRecord>(
+          {
+            model: "organization",
+            data: {
+              ...orgFields,
+              name: input.name,
+              slug,
+              createdAt: now,
+              seatLimit: invite.presetSeatLimit ?? null,
+              disabledAt: null
+            }
+          }
+        );
+      } catch (e) {
+        // Unique slug race between precheck and create.
+        if (!pre.preset) throw APIError.from("CONFLICT", INVITE_ERROR_CODES.ORG_SLUG_TAKEN);
+        if (attempt >= SLUG_SUFFIX_ATTEMPTS || !(await slugTaken(ctx, slug))) throw e;
+        slug = suffixed(invite.presetOrganizationSlug ?? slugify(input.name));
+      }
+    }
   }
 
   async function resolveOrgRoleForRedeem(
@@ -817,22 +898,7 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
 
     if (invite.kind === "org-create") {
       if (!pre.orgInput) return null;
-      let org: OrganizationRecord;
-      try {
-        org = await ctx.context.adapter.create<Omit<OrganizationRecord, "id">, OrganizationRecord>({
-          model: "organization",
-          data: {
-            name: pre.orgInput.name,
-            slug: pre.orgInput.slug,
-            createdAt: now,
-            seatLimit: invite.presetSeatLimit ?? null,
-            disabledAt: null
-          }
-        });
-      } catch {
-        // Unique slug race between precheck and create.
-        throw APIError.from("CONFLICT", INVITE_ERROR_CODES.ORG_SLUG_TAKEN);
-      }
+      const org = await createFoundedOrg(ctx, invite, pre.orgInput, pre, now);
       const member = await ctx.context.adapter.create<Omit<MemberRecord, "id">, MemberRecord>({
         model: "member",
         data: {
@@ -991,7 +1057,7 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
     }
     const extraFields = parseAdditionalFields(body, "SIGN_UP");
 
-    const pre = await assertOrgRedeemable(ctx, invite, body);
+    let pre = await assertOrgRedeemable(ctx, invite, body);
 
     if (invite.type === "private") {
       let target = invite.preCreatedUserId
@@ -1039,13 +1105,22 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
           callbackURL: buildInviteUrl(ctx, body.token, invite.type)
         });
       }
+      const targetId = target.id;
+      const dropCreatedShell = async () => {
+        if (!createdShell) return;
+        await ctx.context.adapter
+          .delete({ model: "user", where: [{ field: "id", value: targetId }] })
+          .catch(() => {});
+      };
+      try {
+        pre = await runBeforeOrgCreate(invite, target, pre);
+      } catch (e) {
+        await dropCreatedShell();
+        throw e;
+      }
       const claimed = await claimUse(ctx, invite);
       if (!claimed) {
-        if (createdShell) {
-          await ctx.context.adapter
-            .delete({ model: "user", where: [{ field: "id", value: target.id }] })
-            .catch(() => {});
-        }
+        await dropCreatedShell();
         throw APIError.from("BAD_REQUEST", INVITE_ERROR_CODES.INVITE_ALREADY_USED);
       }
       let sessionCreated = false;
@@ -1177,6 +1252,9 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
         PROVISIONING_SOURCE
       );
       createdUserId = user.id;
+      // The public sign-up has no user before its claim, so the hook runs
+      // here; the catch below deletes the user and returns the use.
+      pre = await runBeforeOrgCreate(invite, user, pre);
       if (body.password) {
         const hash = await ctx.context.password.hash(body.password);
         await ctx.context.internalAdapter.createAccount({
@@ -1296,7 +1374,11 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
     // Confirm-step fields validate before the claim, so bad input never
     // consumes a use.
     const extraFields = parseAdditionalFields(body, "CONFIRM");
-    const pre = await assertOrgRedeemable(ctx, invite, body);
+    const pre = await runBeforeOrgCreate(
+      invite,
+      session.user,
+      await assertOrgRedeemable(ctx, invite, body)
+    );
     const claimed = await claimUse(ctx, invite);
     if (!claimed) {
       throw APIError.from("BAD_REQUEST", INVITE_ERROR_CODES.INVITE_USES_EXHAUSTED);
@@ -1339,7 +1421,13 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
     organizationId: z.string().max(200).optional(),
     organizationRole: z.string().max(100).optional(),
     teamId: z.string().max(200).optional(),
-    presetSeatLimit: z.number().int().positive().optional()
+    presetSeatLimit: z.number().int().positive().optional(),
+    organization: z
+      .object({
+        name: z.string().trim().min(1).max(200),
+        slug: z.string().trim().toLowerCase().min(1).max(200).optional()
+      })
+      .optional()
   });
 
   type CreateInviteBody = z.infer<typeof createInviteBody>;
@@ -1406,7 +1494,7 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
       if (!body.organizationId) {
         throw APIError.from("UNPROCESSABLE_ENTITY", INVITE_ERROR_CODES.ORGANIZATION_ID_REQUIRED);
       }
-      if (body.presetSeatLimit != null) {
+      if (body.presetSeatLimit != null || body.organization) {
         throw APIError.from("UNPROCESSABLE_ENTITY", INVITE_ERROR_CODES.ORG_FIELDS_NOT_ALLOWED);
       }
       let memberRoles: string[] = [];
@@ -1474,7 +1562,7 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
       }
       if (kind === "org-create") {
         await requireOrgFeatures();
-      } else if (body.presetSeatLimit != null) {
+      } else if (body.presetSeatLimit != null || body.organization) {
         throw APIError.from("UNPROCESSABLE_ENTITY", INVITE_ERROR_CODES.ORG_FIELDS_NOT_ALLOWED);
       }
     }
@@ -1566,6 +1654,8 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
           organizationRole,
           teamId: kind === "org-join" ? (body.teamId ?? null) : null,
           presetSeatLimit: kind === "org-create" ? (body.presetSeatLimit ?? null) : null,
+          presetOrganizationName: body.organization?.name ?? null,
+          presetOrganizationSlug: body.organization?.slug ?? null,
           preCreatedUserId,
           createdByUserId,
           inviterName,
@@ -1593,7 +1683,7 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
             token,
             inviterName,
             inviterEmail,
-            organizationName: org?.name ?? null,
+            organizationName: org?.name ?? invite.presetOrganizationName ?? null,
             inviteId: invite.id,
             organizationId: invite.organizationId,
             organizationRole: invite.organizationRole,
@@ -1612,7 +1702,7 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
             token,
             inviterName,
             inviterEmail,
-            organizationName: org?.name ?? null,
+            organizationName: org?.name ?? invite.presetOrganizationName ?? null,
             inviteId: invite.id,
             organizationId: invite.organizationId,
             organizationRole: invite.organizationRole,
@@ -2154,7 +2244,7 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
                 token,
                 inviterName: invite.inviterName,
                 inviterEmail: invite.inviterEmail,
-                organizationName: org?.name ?? null,
+                organizationName: org?.name ?? invite.presetOrganizationName ?? null,
                 inviteId: invite.id,
                 organizationId: invite.organizationId,
                 organizationRole: invite.organizationRole,
@@ -2173,7 +2263,7 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
                 token,
                 inviterName: invite.inviterName,
                 inviterEmail: invite.inviterEmail,
-                organizationName: org?.name ?? null,
+                organizationName: org?.name ?? invite.presetOrganizationName ?? null,
                 inviteId: invite.id,
                 organizationId: invite.organizationId,
                 organizationRole: invite.organizationRole,
@@ -2300,6 +2390,8 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
           if (invite.kind === "org-join" && invite.organizationId && orgEnabled()) {
             const org = await findOrg(ctx, invite.organizationId);
             organizationName = org?.name ?? null;
+          } else if (invite.kind === "org-create") {
+            organizationName = invite.presetOrganizationName ?? null;
           }
 
           // nextAction drives a single invite page for every kind.
@@ -2333,7 +2425,7 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
               (isEffectivelyRequired(field) ? requiredFields : optionalFields).push(key);
             }
           }
-          if (invite.kind === "org-create" && nextAction) {
+          if (invite.kind === "org-create" && nextAction && !invite.presetOrganizationName) {
             requiredFields.push("organizationName", "organizationSlug");
           }
           // Types let the page render the right input for each extra field.

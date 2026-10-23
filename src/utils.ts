@@ -8,6 +8,19 @@ export async function sha256Base64Url(input: string): Promise<string> {
   return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
+/** URL-safe slug for an org name; "org" when nothing usable remains. */
+export function slugify(name: string): string {
+  const slug = name
+    .normalize("NFKD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48)
+    .replace(/-+$/, "");
+  return slug || "org";
+}
+
 export async function storedTokenValue(token: string, hashTokens: boolean): Promise<string> {
   return hashTokens ? sha256Base64Url(token) : token;
 }

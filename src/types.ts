@@ -21,6 +21,10 @@ export interface Invite {
   organizationRole: string | null;
   teamId: string | null;
   presetSeatLimit: number | null;
+  /** org-create: the founded org's name, fixed by the inviter. */
+  presetOrganizationName: string | null;
+  /** org-create: the founded org's slug, suffixed when taken at redemption. */
+  presetOrganizationSlug: string | null;
   preCreatedUserId: string | null;
   createdByUserId: string | null;
   inviterName: string;
@@ -198,6 +202,19 @@ export interface BetterEnrollmentOrgOptions {
   resolveSeatLimit?: (org: OrganizationRecord) => Promise<number | null> | number | null;
   /** Revoke an inviter's pending invites when the admin plugin bans them. Default true. */
   revokeInvitesOnInviterBan?: boolean;
+
+  /**
+   * Runs when an org-create redemption is about to found its org. The
+   * returned fields are added to the organization row (your org plugin
+   * additionalFields); name, slug, createdAt, seatLimit and disabledAt
+   * always come from the invite flow. Throw an APIError to refuse the
+   * redemption with that error.
+   */
+  beforeOrgCreate?: (data: {
+    invite: Invite;
+    user: User;
+    organization: { name: string; slug: string };
+  }) => Promise<Record<string, unknown> | void> | Record<string, unknown> | void;
 
   onOrgMemberAdded?: (data: {
     organization: OrganizationRecord;

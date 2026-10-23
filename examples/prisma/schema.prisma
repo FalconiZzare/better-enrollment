@@ -26,6 +26,8 @@ model Invite {
   organizationRole String? // org-join: role written to member.role on redeem
   teamId           String? // org-join: optional team joined on redeem
   presetSeatLimit  Int? // org-create: seat limit applied to the founded org
+  presetOrganizationName String? // org-create: fixed name of the founded org
+  presetOrganizationSlug String? // org-create: fixed slug (suffixed on conflict)
   preCreatedUserId String?
   createdByUserId  String?
   inviterName      String

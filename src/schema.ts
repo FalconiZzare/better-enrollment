@@ -27,6 +27,8 @@ const inviteFields = {
   organizationRole: { type: "string", required: false, input: false },
   teamId: { type: "string", required: false, input: false },
   presetSeatLimit: { type: "number", required: false, input: false },
+  presetOrganizationName: { type: "string", required: false, input: false },
+  presetOrganizationSlug: { type: "string", required: false, input: false },
   // Indexed: the passwordless sign-in guard does point lookups by it.
   preCreatedUserId: { type: "string", required: false, input: false, index: true },
   // No FK: accepted invites outlive their inviter (denormalized fields).
