@@ -1348,7 +1348,13 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
   // carries its own attribution and skips the permission gates only; every
   // state invariant (seat limits, email locks, org checks) still runs.
   type InviteCreateActor =
-    { type: "user" } | { type: "system"; inviterName: string; inviterEmail: string };
+    | { type: "user" }
+    | {
+        type: "system";
+        inviterName: string;
+        inviterEmail: string;
+        createdByUserId: string | null;
+      };
 
   async function createInviteCore(
     ctx: GenericEndpointContext,
@@ -1474,7 +1480,7 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
     }
 
     // For a user actor, creator is always resolved by the gating above.
-    const createdByUserId = creator?.id ?? null;
+    const createdByUserId = actor.type === "system" ? actor.createdByUserId : (creator?.id ?? null);
     const inviterName = actor.type === "system" ? actor.inviterName : (creator?.name ?? "");
     const inviterEmail = actor.type === "system" ? actor.inviterEmail : (creator?.email ?? "");
 
@@ -1588,6 +1594,10 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
             inviterName,
             inviterEmail,
             organizationName: org?.name ?? null,
+            inviteId: invite.id,
+            organizationId: invite.organizationId,
+            organizationRole: invite.organizationRole,
+            teamId: invite.teamId,
             expiresAt
           },
           ctx.request
@@ -1603,6 +1613,10 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
             inviterName,
             inviterEmail,
             organizationName: org?.name ?? null,
+            inviteId: invite.id,
+            organizationId: invite.organizationId,
+            organizationRole: invite.organizationRole,
+            teamId: invite.teamId,
             maxUses,
             expiresAt
           },
@@ -2028,7 +2042,8 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
             inviter: z
               .object({
                 name: z.string().max(200).optional(),
-                email: z.string().max(200).optional()
+                email: z.string().max(200).optional(),
+                userId: z.string().min(1).max(200).optional()
               })
               .optional()
           })
@@ -2041,10 +2056,13 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
           const inviterName =
             ctx.body.inviter?.name || (!appName || appName === "Better Auth" ? "System" : appName);
           const inviterEmail = ctx.body.inviter?.email || "System";
+          // An attributed system invite behaves like that user's own for
+          // the ban and remove-user cleanup hooks.
           return await createInviteCore(ctx, ctx.body, {
             type: "system",
             inviterName,
-            inviterEmail
+            inviterEmail,
+            createdByUserId: ctx.body.inviter?.userId ?? null
           });
         }
       ),
@@ -2137,6 +2155,10 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
                 inviterName: invite.inviterName,
                 inviterEmail: invite.inviterEmail,
                 organizationName: org?.name ?? null,
+                inviteId: invite.id,
+                organizationId: invite.organizationId,
+                organizationRole: invite.organizationRole,
+                teamId: invite.teamId,
                 expiresAt
               },
               ctx.request
@@ -2152,6 +2174,10 @@ export const betterEnrollment = (options: BetterEnrollmentOptions) => {
                 inviterName: invite.inviterName,
                 inviterEmail: invite.inviterEmail,
                 organizationName: org?.name ?? null,
+                inviteId: invite.id,
+                organizationId: invite.organizationId,
+                organizationRole: invite.organizationRole,
+                teamId: invite.teamId,
                 maxUses: invite.maxUses,
                 expiresAt
               },

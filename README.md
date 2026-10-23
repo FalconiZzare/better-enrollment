@@ -115,6 +115,8 @@ export const auth = betterAuth({
   plugins: [
     admin(),
     betterEnrollment({
+      // Also receives inviteId, kind, organizationId, organizationName,
+      // organizationRole and teamId, to word each kind of invite differently.
       async sendPrivateInvitation({ email, url }) {
         await sendInvitationEmail(email, url);
       }
@@ -271,14 +273,15 @@ await auth.api.createSystemInvite({
   body: {
     type: "private",
     email: "ada@example.com",
-    inviter: { name: "Billing", email: "billing@acme.com" } // optional
+    // optional; userId attributes the invite to a real user
+    inviter: { name: "Billing", email: "billing@acme.com", userId: actingUser.id }
   }
 });
 
 const { deleted } = await auth.api.cleanupExpiredInvites();
 ```
 
-> **Trusted server code only.** `createSystemInvite` skips authentication and the admin gate; whoever can call it can mint invites for any role. Keep it in code paths you fully control, never behind a client-reachable route, and never forward unvalidated client input into it. It also thins the audit trail: system invites store a null `createdByUserId` and a self-declared inviter.
+> **Trusted server code only.** `createSystemInvite` skips authentication and the admin gate; whoever can call it can mint invites for any role. Keep it in code paths you fully control, never behind a client-reachable route, and never forward unvalidated client input into it. It also thins the audit trail: without `inviter.userId`, system invites store a null `createdByUserId` and a self-declared inviter. Pass `inviter.userId` when the server acts for someone, so the invite is attributed to them and the ban and remove-user hooks clean it up like their own.
 
 Every method, payloads, and rate limits: [API reference](https://better-enrollment.octopi.ai/docs/api).
 

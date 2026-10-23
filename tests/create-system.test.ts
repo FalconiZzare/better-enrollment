@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Invite, PrivateInvitationEmailData } from "../src/types";
 import type { User } from "better-auth";
-import { createTestAuth, findInviteRow, findUserByEmail, seedUser } from "./helpers";
+import { createTestAuth, findInviteRow, findUserByEmail, seedAdmin, seedUser } from "./helpers";
 
 async function captureError(fn: () => Promise<unknown>) {
   try {
@@ -153,5 +153,33 @@ describe("system invite creation (server-only, no session)", () => {
     });
     expect(seen).toHaveLength(1);
     expect(seen[0]!.admin).toBeNull();
+  });
+
+  it("inviter.userId attributes the invite, so banning that user revokes it", async () => {
+    const auth = await createTestAuth();
+    const adminHeaders = await seedAdmin(auth);
+    const actor = await seedUser(auth, { email: "msp-admin@test.com", name: "MSP Admin" });
+
+    const res = await auth.api.createSystemInvite({
+      body: {
+        type: "private",
+        email: "invitee@test.com",
+        inviter: { name: "MSP Admin", email: "msp-admin@test.com", userId: actor.id }
+      }
+    });
+    const row = await findInviteRow(auth, res.inviteId);
+    expect(row?.createdByUserId).toBe(actor.id);
+    expect(row?.inviterName).toBe("MSP Admin");
+
+    await auth.api.banUser({ body: { userId: actor.id }, headers: adminHeaders });
+    expect((await findInviteRow(auth, res.inviteId))?.status).toBe("cancelled");
+  });
+
+  it("system invites without inviter.userId stay unattributed", async () => {
+    const auth = await createTestAuth();
+    const res = await auth.api.createSystemInvite({
+      body: { type: "private", email: "invitee@test.com", inviter: { name: "Billing" } }
+    });
+    expect((await findInviteRow(auth, res.inviteId))?.createdByUserId).toBeNull();
   });
 });
