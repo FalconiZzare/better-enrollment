@@ -8,6 +8,57 @@ export async function sha256Base64Url(input: string): Promise<string> {
   return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
+function base64UrlEncode(input: string): string {
+  let bin = "";
+  for (const b of new TextEncoder().encode(input)) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function base64UrlDecode(input: string): string {
+  const bin = atob(input.replace(/-/g, "+").replace(/_/g, "/"));
+  return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
+}
+
+/** Opaque keyset cursor over (createdAt desc, id desc). */
+export function encodeCursor(row: { createdAt: Date | string; id: string }): string {
+  return base64UrlEncode(`${new Date(row.createdAt).toISOString()}|${row.id}`);
+}
+
+export function decodeCursor(cursor: string): { createdAt: Date; id: string } | null {
+  try {
+    const raw = base64UrlDecode(cursor);
+    const sep = raw.indexOf("|");
+    if (sep <= 0 || sep === raw.length - 1) return null;
+    const createdAt = new Date(raw.slice(0, sep));
+    if (Number.isNaN(createdAt.getTime())) return null;
+    return { createdAt, id: raw.slice(sep + 1) };
+  } catch {
+    return null;
+  }
+}
+
+export function compareNewestFirst(
+  a: { createdAt: Date | string; id: string },
+  b: { createdAt: Date | string; id: string }
+): number {
+  const diff = new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+  if (diff !== 0) return diff;
+  return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+}
+
+/** URL-safe slug for an org name; "org" when nothing usable remains. */
+export function slugify(name: string): string {
+  const slug = name
+    .normalize("NFKD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48)
+    .replace(/-+$/, "");
+  return slug || "org";
+}
+
 export async function storedTokenValue(token: string, hashTokens: boolean): Promise<string> {
   return hashTokens ? sha256Base64Url(token) : token;
 }
